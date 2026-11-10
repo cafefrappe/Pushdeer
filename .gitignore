@@ -1,0 +1,9 @@
+.env
+.env.local
+*.log
+.DS_Store
+*.key
+*.pem
+id_rsa*
+id_ed25519*
+.notify.env
