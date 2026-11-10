@@ -1,0 +1,39 @@
+# 模式 A：纯 Actions，无 VPS。
+# 复制到业务仓库：.github/workflows/pushdeer.yml 后按需改名字与脚本。
+#
+# Secrets：
+#   PUSHDEER_KEY   （或 PUSHDEER_SENDKEY）
+#   以及业务自己的凭据
+name: Notify via PushDeer
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 9 * * *"
+      timezone: "Asia/Shanghai"
+
+concurrency:
+  group: pushdeer-actions-only
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # 按语言改：Python / Node / 纯 shell 均可
+      - name: Run job and notify
+        env:
+          PUSHDEER_KEY: ${{ secrets.PUSHDEER_KEY }}
+          # YOUR_COOKIE: ${{ secrets.YOUR_COOKIE }}
+        run: |
+          set -euo pipefail
+          # --- 业务逻辑（示例）---
+          TITLE="任务完成"
+          DESP="在此拼接结果摘要"
+
+          # --- 推送 ---
+          source examples/push.sh
+          pushdeer_send "$TITLE" "$DESP"

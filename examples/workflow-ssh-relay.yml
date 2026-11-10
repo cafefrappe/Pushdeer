@@ -1,0 +1,90 @@
+# 模式 B：Actions SSH 到机器采集，再由 Actions 推 PushDeer。
+# 复制到业务仓库：.github/workflows/pushdeer.yml，并改远程脚本路径。
+#
+# Secrets：
+#   PUSHDEER_KEY     PushDeer 的 PDU… 密钥
+#   VPS_HOST         如 ubuntu@x.x.x.x
+#   VPS_SSH_KEY      SSH 私钥；推荐 Base64 单行：
+#                    macOS:  base64 < ~/.ssh/your.key | pbcopy
+name: PushDeer SSH Relay
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 9 * * *"
+      timezone: "Asia/Shanghai"
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Collect remotely and push
+        env:
+          PUSHDEER_KEY: ${{ secrets.PUSHDEER_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          # 改成你机器上的采集脚本绝对路径
+          REMOTE_SCRIPT: /home/ubuntu/your-app/collect_status.sh
+        run: |
+          set -euo pipefail
+          if [ -z "${PUSHDEER_KEY:-}" ] || [ -z "${VPS_HOST:-}" ] || [ -z "${VPS_SSH_KEY:-}" ]; then
+            echo "缺少 Secrets：PUSHDEER_KEY / VPS_HOST / VPS_SSH_KEY"
+            exit 1
+          fi
+
+          KEYFILE="$(mktemp)"
+          trap 'rm -f "$KEYFILE"' EXIT
+
+          # 兼容：PEM 多行 / 字面量 \n / Base64 单行（推荐）
+          write_key() {
+            local raw="$1"
+            raw="$(printf '%s' "$raw" | tr -d '\r')"
+            if printf '%s' "$raw" | grep -q 'BEGIN .*PRIVATE KEY'; then
+              printf '%s\n' "$raw" | sed 's/\\n/\n/g' >"$KEYFILE"
+            else
+              printf '%s' "$raw" | tr -d ' \n\t' | base64 -d >"$KEYFILE" 2>/dev/null \
+                || printf '%s' "$raw" | tr -d ' \n\t' | base64 --decode >"$KEYFILE"
+            fi
+            [ -n "$(tail -c1 "$KEYFILE" | tr -d '\n' || true)" ] && printf '\n' >>"$KEYFILE"
+            chmod 600 "$KEYFILE"
+          }
+
+          write_key "$VPS_SSH_KEY"
+
+          if ! ssh-keygen -y -f "$KEYFILE" >/dev/null 2>&1; then
+            echo "VPS_SSH_KEY 无法被识别为私钥（常见原因：换行丢失）。"
+            echo "请执行： base64 < ~/.ssh/your.key | pbcopy  后更新 Secret。"
+            exit 1
+          fi
+
+          STATUS="$(ssh -i "$KEYFILE" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=20 \
+            "$VPS_HOST" \
+            "bash '$REMOTE_SCRIPT'")"
+
+          TITLE="$(printf '%s\n' "$STATUS" | head -n 1)"
+          DESP="$(printf '%s\n' "$STATUS" | tail -n +2)"
+
+          # 若已把 examples/push.sh checkout 进仓库，可改用 source；此处内联等价逻辑便于单文件复制
+          if [ "${#DESP}" -gt 3500 ]; then
+            DESP="$(printf '%s' "$DESP" | head -c 3500)
+…(已截断)"
+          fi
+
+          ok=0
+          for base in \
+            "https://api2.pushdeer.com/message/push" \
+            "https://api.pushdeer.com/message/push"
+          do
+            if curl -fsS --connect-timeout 15 --max-time 40 -X POST "$base" \
+              --data-urlencode "pushkey=${PUSHDEER_KEY}" \
+              --data-urlencode "text=${TITLE}" \
+              --data-urlencode "desp=${DESP}"; then
+              echo
+              echo "pushed via $base"
+              ok=1
+              break
+            fi
+            echo "failed: $base" >&2
+          done
+          [ "$ok" = 1 ] || exit 1
